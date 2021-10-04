@@ -6,13 +6,17 @@ package main
 */
 
 import (
-	"flag"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+
+	. "github.com/mattn/go-getopt"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
+	"golang.org/x/net/context"
 )
 
 /*
@@ -31,14 +35,35 @@ import (
 
 //=============================================================================
 
+type Dfs struct {
+	root    *DNode
+	nodeMap map[uint64]*DNode
+}
+
 type DNode struct {
-	nid   uint64
+	//	nid   uint64
 	name  string
 	attr  fuse.Attr
 	dirty bool
-	kids  map[string]*DNode
+	child map[string]*DNode
 	data  []uint8
 }
+
+func (n *DNode) Inode() uint64 {
+	return n.attr.Inode
+}
+
+func (n *DNode) Type() fuse.DirentType {
+	if n.child == nil {
+		return fuse.DT_File
+	} else {
+		return fuse.DT_Dir
+	}
+}
+
+//func (node *DNode) newNode()
+
+//----------------------------------------
 
 var root *DNode
 
@@ -47,15 +72,23 @@ var _ fs.Node = (*DNode)(nil)
 var _ fs.FS = (*Dfs)(nil)
 
 var debug = false
-var mountPoint = "dss"
+var mountPoint = "/tmp/dss"
 
 //=============================================================================
 
-func p_out(s string, args ...interface{}) {
+func p_printf(s string, args ...interface{}) {
 	if !debug {
 		return
 	}
-	fmt.Printf(s, args...)
+	fmt.Printf(s+"\n", args...)
+}
+
+func p_println(args ...interface{}) {
+	if !debug {
+		return
+	}
+	fmt.Print(args...)
+	fmt.Print("\n")
 }
 
 func p_err(s string, args ...interface{}) {
@@ -72,9 +105,48 @@ func p_err(s string, args ...interface{}) {
 //   func (n *DNode) Getattr(ctx context.Context, req *fuse.GetattrRequest, resp *fuse.GetattrResponse) error
 // must be defined or editing w/ vi or emacs fails. Doesn't have to do anything
 
+func (dfs Dfs) Root() (n fs.Node, err error) {
+	p_println("Root, ", n)
+	return dfs.root, nil
+}
+
+func (n *DNode) Attr(ctx context.Context, attr *fuse.Attr) error {
+	p_println("Attr, ", n.Inode(), ", ", attr)
+	n.attr = *attr
+	return nil
+}
+
+func (n *DNode) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	p_printf("Lookup, %d, %s", n.Inode(), name)
+	c, ok := n.child[name]
+	if !ok {
+		p_printf("%s not found", name)
+		return nil, fuse.ENOENT
+	}
+	return c, nil
+}
+
+func (n *DNode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	p_printf("ReadDirAll, %d", n.Inode())
+	var result []fuse.Dirent
+	if n.Type() != fuse.DT_Dir {
+		return nil, errors.New("node is not a directory")
+	}
+	for _, c := range n.child {
+		result = append(result, fuse.Dirent{Inode: c.Inode(), Type: c.Type(), Name: c.name})
+	}
+	return result, nil
+}
+
+func (n *DNode) Getattr(ctx context.Context, req *fuse.GetattrRequest, resp *fuse.GetattrResponse) error {
+	p_printf("Getattr, %d", n.Inode())
+	resp.Attr = n.attr
+	return nil
+}
+
 func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	p_call("func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error \n")
-	p_out("FSYNC\n")
+	//	p_call("func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error \n")
+	p_printf("FSYNC")
 	return nil
 }
 
@@ -87,7 +159,33 @@ func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 //   func (n *DNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error
 //   func (n *DNode) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error
 
+// func (n *DNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+// 	p_printf("Setattr, %d:", n.Inode())
+// 	//p_println(attr)
+
+// }
+
+func (n *DNode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
+	p_printf("Mkdir, %d, ", n.Inode())
+	p_println(req)
+
+	//TODO: check if directory?
+
+	if _, ok := n.child[req.Name]; ok {
+		n.child[req.Name] = &DNode{name: req.Name, attr: fuse.Attr{Inode: 0, Mode: req.Mode}, child: make(map[string]*DNode)}
+	} else {
+		return nil, errors.New("Directory exists")
+	}
+	return n.child[req.Name], nil
+
+}
+
 //=============================================================================
+
+//function passed onto FUSE for debugging
+func logMsg(msg interface{}) {
+	log.Printf("FUSE: %s\n", msg)
+}
 
 func main() {
 	var flag int
@@ -100,6 +198,7 @@ func main() {
 		switch flag {
 		case 'd':
 			debug = !debug
+			fuse.Debug = logMsg
 		case 'm':
 			mountPoint = OptArg
 		default:
@@ -107,17 +206,13 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	p_out("mounting on %q, debug %v\n", mountPoint, debug)
-
-	// root must be defined before here
-	nodeMap[uint64(root.attr.Inode)] = root
-	p_out("root inode %d", int(root.attr.Inode))
+	p_printf("mounting on %q, debug %v", mountPoint, debug)
 
 	if _, err := os.Stat(mountPoint); err != nil {
 		os.Mkdir(mountPoint, 0755)
 	}
 	fuse.Unmount(mountPoint)
-	c, err := fuse.Mount(mountPoint, fuse.FSName("dssFS"), fuse.Subtype("project P1"),
+	conn, err := fuse.Mount(mountPoint, fuse.FSName("dssFS"), fuse.Subtype("project P1"),
 		fuse.LocalVolume(), fuse.VolumeName("dssFS"))
 	if err != nil {
 		log.Fatal(err)
@@ -132,14 +227,22 @@ func main() {
 		os.Exit(1)
 	}()
 
-	err = fs.Serve(c, Dfs{})
+	// root must be defined before here
+	p_println("Creating root")
+	root := DNode{attr: fuse.Attr{Inode: 1}}
+	dfs := Dfs{root: &root}
+	dfs.nodeMap = make(map[uint64]*DNode)
+	dfs.nodeMap[uint64(root.Inode())] = &root
+	p_println("root inode ", root.Inode())
+
+	err = fs.Serve(conn, dfs)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// check if the mount process has an error to report
-	<-c.Ready
-	if err := c.MountError; err != nil {
+	<-conn.Ready
+	if err := conn.MountError; err != nil {
 		log.Fatal(err)
 	}
 }

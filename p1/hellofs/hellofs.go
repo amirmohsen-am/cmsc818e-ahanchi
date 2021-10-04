@@ -3,10 +3,11 @@ package main
 
 import (
 	"fmt"
-	. "github.com/mattn/go-getopt"
 	"log"
 	"os"
 	"os/signal"
+
+	. "github.com/mattn/go-getopt"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -15,7 +16,7 @@ import (
 )
 
 var debug = false
-var mountPoint = "dss"
+var mountPoint = "/tmp/dss"
 
 //=============================================================================
 
@@ -33,6 +34,11 @@ func p_err(s string, args ...interface{}) {
 
 //=============================================================================
 
+//function passed onto FUSE for debugging
+func logMsg(msg interface{}) {
+	log.Printf("FUSE: %s\n", msg)
+}
+
 func main() {
 	var flag int
 
@@ -44,6 +50,7 @@ func main() {
 		switch flag {
 		case 'd':
 			debug = !debug
+			fuse.Debug = logMsg
 		case 'm':
 			mountPoint = OptArg
 		default:
