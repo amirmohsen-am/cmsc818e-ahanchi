@@ -111,8 +111,13 @@ func (dfs Dfs) Root() (n fs.Node, err error) {
 }
 
 func (n *DNode) Attr(ctx context.Context, attr *fuse.Attr) error {
-	p_println("Attr, ", n.Inode(), ", ", attr)
-	n.attr = *attr
+	p_println("Attr, ", n.Inode(), ", ", *attr)
+	attr.Inode = n.attr.Inode
+	attr.Mode = n.attr.Mode
+	//TODO: set other attributes
+	attr.Atime = n.attr.Atime
+	attr.Mtime = n.attr.Mtime
+	attr.Ctime = n.attr.Ctime
 	return nil
 }
 
@@ -140,6 +145,7 @@ func (n *DNode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 func (n *DNode) Getattr(ctx context.Context, req *fuse.GetattrRequest, resp *fuse.GetattrResponse) error {
 	p_printf("Getattr, %d", n.Inode())
+	p_println(n.attr)
 	resp.Attr = n.attr
 	return nil
 }
@@ -165,14 +171,24 @@ func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 
 // }
 
+func createDir(nid uint64, name string, mode os.FileMode) *DNode {
+	return &DNode{
+		name:  name,
+		attr:  fuse.Attr{Inode: nid, Mode: mode},
+		child: make(map[string]*DNode),
+	}
+}
+
 func (n *DNode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	p_printf("Mkdir, %d, ", n.Inode())
 	p_println(req)
 
 	//TODO: check if directory?
 
-	if _, ok := n.child[req.Name]; ok {
-		n.child[req.Name] = &DNode{name: req.Name, attr: fuse.Attr{Inode: 0, Mode: req.Mode}, child: make(map[string]*DNode)}
+	if _, ok := n.child[req.Name]; !ok {
+		// nid:0 -> dynamic nid
+		n.child[req.Name] = createDir(0, req.Name, req.Mode)
+
 	} else {
 		return nil, errors.New("Directory exists")
 	}
@@ -229,10 +245,10 @@ func main() {
 
 	// root must be defined before here
 	p_println("Creating root")
-	root := DNode{attr: fuse.Attr{Inode: 1}}
-	dfs := Dfs{root: &root}
+	root := createDir(1, "", os.ModeDir|0777)
+	dfs := Dfs{root: root}
 	dfs.nodeMap = make(map[uint64]*DNode)
-	dfs.nodeMap[uint64(root.Inode())] = &root
+	dfs.nodeMap[uint64(root.Inode())] = root
 	p_println("root inode ", root.Inode())
 
 	err = fs.Serve(conn, dfs)
