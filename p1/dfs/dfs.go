@@ -49,6 +49,14 @@ type DNode struct {
 	data  []uint8
 }
 
+func (n *DNode) String() string {
+	if n.Type() == fuse.DT_Dir {
+		return fmt.Sprintf("(Dir)name=%s, num_child=%d, attr=[%s]", n.name, len(n.child), n.attr)
+	} else {
+		return fmt.Sprintf("(File)name=%s, size=%d, attr=[%s]", n.name, len(n.data), n.attr)
+	}
+}
+
 func (n *DNode) Inode() uint64 {
 	return n.attr.Inode
 }
@@ -65,7 +73,7 @@ func (n *DNode) Type() fuse.DirentType {
 
 //----------------------------------------
 
-var root *DNode
+//var root *DNode
 
 //  Compile error if DNode does not implement interface fs.Node, or if FS does not implement fs.FS
 var _ fs.Node = (*DNode)(nil)
@@ -106,23 +114,28 @@ func p_err(s string, args ...interface{}) {
 // must be defined or editing w/ vi or emacs fails. Doesn't have to do anything
 
 func (dfs Dfs) Root() (n fs.Node, err error) {
-	p_println("Root, ", n)
+	p_println("Root,", dfs.root)
 	return dfs.root, nil
 }
 
 func (n *DNode) Attr(ctx context.Context, attr *fuse.Attr) error {
-	p_println("Attr, ", n.Inode(), ", ", *attr)
-	attr.Inode = n.attr.Inode
+	p_printf("Attr, {%s}", n)
+	//	attr.Inode = n.attr.Inode
 	attr.Mode = n.attr.Mode
+	attr.Size = n.attr.Size
+
+	attr.Uid = n.attr.Uid
+	attr.Gid = n.attr.Gid
 	//TODO: set other attributes
 	attr.Atime = n.attr.Atime
 	attr.Mtime = n.attr.Mtime
 	attr.Ctime = n.attr.Ctime
+
 	return nil
 }
 
 func (n *DNode) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	p_printf("Lookup, %d, %s", n.Inode(), name)
+	p_printf("Lookup, {%s}, %s", n, name)
 	c, ok := n.child[name]
 	if !ok {
 		p_printf("%s not found", name)
@@ -132,7 +145,7 @@ func (n *DNode) Lookup(ctx context.Context, name string) (fs.Node, error) {
 }
 
 func (n *DNode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	p_printf("ReadDirAll, %d", n.Inode())
+	p_printf("ReadDirAll, {%s}", n)
 	var result []fuse.Dirent
 	if n.Type() != fuse.DT_Dir {
 		return nil, errors.New("node is not a directory")
@@ -144,7 +157,7 @@ func (n *DNode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 }
 
 func (n *DNode) Getattr(ctx context.Context, req *fuse.GetattrRequest, resp *fuse.GetattrResponse) error {
-	p_printf("Getattr, %d", n.Inode())
+	p_printf("Getattr, {%s}", n)
 	p_println(n.attr)
 	resp.Attr = n.attr
 	return nil
@@ -165,12 +178,6 @@ func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 //   func (n *DNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error
 //   func (n *DNode) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error
 
-// func (n *DNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-// 	p_printf("Setattr, %d:", n.Inode())
-// 	//p_println(attr)
-
-// }
-
 func createDir(nid uint64, name string, mode os.FileMode) *DNode {
 	return &DNode{
 		name:  name,
@@ -180,7 +187,7 @@ func createDir(nid uint64, name string, mode os.FileMode) *DNode {
 }
 
 func (n *DNode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
-	p_printf("Mkdir, %d, ", n.Inode())
+	p_printf("Mkdir, {%s}, ", n)
 	p_println(req)
 
 	//TODO: check if directory?
@@ -190,10 +197,138 @@ func (n *DNode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, err
 		n.child[req.Name] = createDir(0, req.Name, req.Mode)
 
 	} else {
-		return nil, errors.New("Directory exists")
+		return nil, errors.New("directory exists")
 	}
 	return n.child[req.Name], nil
 
+}
+
+func (n *DNode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	p_printf("Setattr, {%s}", n)
+	p_println(req.Mode)
+	//TODO req.Valid?
+	if req.Valid.Mode() {
+		n.attr.Mode = req.Mode
+	}
+	if req.Valid.Size() {
+		n.attr.Size = req.Size
+	}
+
+	if req.Valid.Uid() {
+		n.attr.Uid = req.Uid
+	}
+	if req.Valid.Gid() {
+		n.attr.Gid = req.Gid
+	}
+
+	if req.Valid.Atime() {
+		n.attr.Atime = req.Atime
+	}
+
+	if req.Valid.Mtime() {
+		n.attr.Mtime = req.Mtime
+	}
+	return nil
+}
+
+func (n *DNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+	p_printf("Create, {%s}, %s", n, req.Name)
+
+	// req.Flag may need to be implemented
+
+	var file *DNode
+	if _, ok := n.child[req.Name]; !ok {
+		// nid:0 -> dyanimc nid
+		file = &DNode{name: req.Name, attr: fuse.Attr{Inode: 0, Mode: req.Mode}, data: make([]uint8, 0)}
+		n.child[req.Name] = file
+	} else {
+		return nil, nil, errors.New("file exists")
+	}
+	p_println("Created: ", file)
+	return file, file, nil
+
+}
+
+func (n *DNode) ReadAll(ctx context.Context) ([]byte, error) {
+	p_printf("ReadAll, %d", n.Inode())
+	return n.data, nil
+}
+
+func (n *DNode) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	p_printf("Write, %d, n.data_size:%d, data_size: %d, offset:%d, ", n.Inode(), len(n.data), len(req.Data), req.Offset)
+	// How could this be different?
+	resp.Size = len(req.Data)
+	if len(req.Data)+int(req.Offset) > len(n.data) {
+		tmp := n.data
+		n.data = make([]uint8, len(req.Data)+int(req.Offset))
+		copy(n.data, tmp)
+	}
+	copy(n.data[req.Offset:], req.Data[:])
+
+	// mark as dirty?
+	n.dirty = true
+
+	n.attr.Size = uint64(len(n.data))
+	return nil
+}
+
+func (n *DNode) Flush(ctx context.Context, req *fuse.FlushRequest) error {
+	p_printf("Flush, {%s}", n)
+	if !n.dirty {
+		return nil
+	}
+	n.dirty = false
+	//TODO: change modified time
+	return nil
+}
+
+func (n *DNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+	p_printf("Remove, {%s}", n)
+
+	var c *DNode
+	var ok bool
+	if c, ok = n.child[req.Name]; !ok {
+		return errors.New("file or dir does not exist")
+	}
+
+	if req.Dir && len(c.child) > 0 {
+		return errors.New("can not remove an non-empty directory")
+	}
+
+	delete(n.child, req.Name)
+
+	p_println("Remove successful")
+	return nil
+
+}
+
+func (n *DNode) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
+	p_printf("Rename, {%s}, oldName: %s, newName: %s", n, req.OldName, req.NewName)
+
+	var ok bool
+	var node, dest *DNode
+
+	//TODO use assert when converting
+	if dest, ok = newDir.(*DNode); !ok {
+		return errors.New("can not covert fs.Node to DNode")
+	}
+
+	if node, ok = n.child[req.OldName]; !ok {
+		return errors.New("file or dir does not exist")
+	}
+
+	if _, ok := dest.child[req.NewName]; ok {
+		return errors.New("file already exists at destination")
+	}
+
+	node.name = req.NewName
+	dest.child[node.name] = node
+
+	delete(n.child, req.OldName)
+
+	p_printf("Rename successful")
+
+	return nil
 }
 
 //=============================================================================
@@ -207,18 +342,19 @@ func main() {
 	var flag int
 
 	for {
-		if flag = Getopt("dm:"); flag == EOF {
+		if flag = Getopt("dfm:"); flag == EOF {
 			break
 		}
 
 		switch flag {
 		case 'd':
 			debug = !debug
+		case 'f':
 			fuse.Debug = logMsg
 		case 'm':
 			mountPoint = OptArg
 		default:
-			println("usage: main.go [-d | -m <mountpt>]", flag)
+			println("usage: main.go [-d | -f (fuse debug) | -m <mountpt>]", flag)
 			os.Exit(1)
 		}
 	}
