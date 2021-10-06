@@ -39,8 +39,9 @@ import (
 var dfs Dfs
 
 type Dfs struct {
-	root    *DNode
-	nodeMap map[uint64]*DNode
+	root     *DNode
+	numNodes uint64
+	//	nodeMap map[uint64]*DNode
 }
 
 type DNode struct {
@@ -187,13 +188,20 @@ func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 //   func (n *DNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error
 //   func (n *DNode) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error
 
-func createDir(nid uint64, name string, mode os.FileMode) *DNode {
+func createNode(name string, mode os.FileMode, isDir bool) *DNode {
+	dfs.numNodes++
 	now := time.Now()
-	return &DNode{
-		name:  name,
-		attr:  fuse.Attr{Inode: nid, Mode: mode, Nlink: 1, Atime: now, Mtime: now, Ctime: now},
-		child: make(map[string]*DNode),
+	node := &DNode{
+		name: name,
+		attr: fuse.Attr{Inode: dfs.numNodes, Mode: mode, Nlink: 1, Atime: now, Mtime: now, Ctime: now},
 	}
+	if isDir {
+		node.child = make(map[string]*DNode)
+	} else {
+		node.data = make([]uint8, 0)
+	}
+	return node
+
 }
 
 func (n *DNode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
@@ -204,7 +212,7 @@ func (n *DNode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, err
 
 	if _, ok := n.child[req.Name]; !ok {
 		// nid:0 -> dynamic nid
-		n.child[req.Name] = createDir(0, req.Name, req.Mode)
+		n.child[req.Name] = createNode(req.Name, req.Mode, true)
 
 	} else {
 		return nil, errors.New("directory exists")
@@ -251,14 +259,7 @@ func (n *DNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.
 	var file *DNode
 	if _, ok := n.child[req.Name]; !ok {
 		// nid:0 -> dyanimc nid
-		file = &DNode{
-			name: req.Name,
-			attr: fuse.Attr{Inode: 0, Mode: req.Mode, Nlink: 1},
-			data: make([]uint8, 0)}
-		now := time.Now()
-		file.attr.Atime = now
-		file.attr.Mtime = now
-		file.attr.Ctime = now
+		file = createNode(req.Name, req.Mode, false)
 		n.child[req.Name] = file
 	} else {
 		return nil, nil, errors.New("file exists")
@@ -452,10 +453,10 @@ func main() {
 
 	// root must be defined before here
 	p_println("Creating root")
-	root := createDir(1, "", os.ModeDir|0777)
+	root := createNode("", os.ModeDir|0777, true)
 	dfs = Dfs{root: root}
-	dfs.nodeMap = make(map[uint64]*DNode)
-	dfs.nodeMap[uint64(root.Inode())] = root
+	// dfs.nodeMap = make(map[uint64]*DNode)
+	// dfs.nodeMap[uint64(root.Inode())] = root
 	p_println("root inode ", root.Inode())
 
 	err = fs.Serve(conn, dfs)
