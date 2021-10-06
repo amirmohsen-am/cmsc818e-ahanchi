@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"time"
 
 	. "github.com/mattn/go-getopt"
 
@@ -34,6 +35,8 @@ import (
 */
 
 //=============================================================================
+
+var dfs Dfs
 
 type Dfs struct {
 	root    *DNode
@@ -136,6 +139,9 @@ func (n *DNode) Attr(ctx context.Context, attr *fuse.Attr) error {
 
 func (n *DNode) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	p_printf("Lookup, {%s}, %s", n, name)
+
+	n.attr.Atime = time.Now()
+
 	c, ok := n.child[name]
 	if !ok {
 		p_printf("%s not found", name)
@@ -146,6 +152,9 @@ func (n *DNode) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 func (n *DNode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	p_printf("ReadDirAll, {%s}", n)
+
+	n.attr.Atime = time.Now()
+
 	var result []fuse.Dirent
 	if n.Type() != fuse.DT_Dir {
 		return nil, errors.New("node is not a directory")
@@ -179,9 +188,10 @@ func (n *DNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 //   func (n *DNode) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error
 
 func createDir(nid uint64, name string, mode os.FileMode) *DNode {
+	now := time.Now()
 	return &DNode{
 		name:  name,
-		attr:  fuse.Attr{Inode: nid, Mode: mode},
+		attr:  fuse.Attr{Inode: nid, Mode: mode, Nlink: 1, Atime: now, Mtime: now, Ctime: now},
 		child: make(map[string]*DNode),
 	}
 }
@@ -236,14 +246,26 @@ func (n *DNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.
 
 	// req.Flag may need to be implemented
 
+	n.attr.Atime = time.Now()
+
 	var file *DNode
 	if _, ok := n.child[req.Name]; !ok {
 		// nid:0 -> dyanimc nid
-		file = &DNode{name: req.Name, attr: fuse.Attr{Inode: 0, Mode: req.Mode}, data: make([]uint8, 0)}
+		file = &DNode{
+			name: req.Name,
+			attr: fuse.Attr{Inode: 0, Mode: req.Mode, Nlink: 1},
+			data: make([]uint8, 0)}
+		now := time.Now()
+		file.attr.Atime = now
+		file.attr.Mtime = now
+		file.attr.Ctime = now
 		n.child[req.Name] = file
 	} else {
 		return nil, nil, errors.New("file exists")
 	}
+
+	n.attr.Mtime = time.Now()
+
 	p_println("Created: ", file)
 	return file, file, nil
 
@@ -251,6 +273,7 @@ func (n *DNode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.
 
 func (n *DNode) ReadAll(ctx context.Context) ([]byte, error) {
 	p_printf("ReadAll, %d", n.Inode())
+	n.attr.Atime = time.Now()
 	return n.data, nil
 }
 
@@ -263,10 +286,12 @@ func (n *DNode) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.Wr
 		n.data = make([]uint8, len(req.Data)+int(req.Offset))
 		copy(n.data, tmp)
 	}
-	copy(n.data[req.Offset:], req.Data[:])
+	copy(n.data[req.Offset:], req.Data)
 
 	// mark as dirty?
 	n.dirty = true
+
+	n.attr.Mtime = time.Now()
 
 	n.attr.Size = uint64(len(n.data))
 	return nil
@@ -277,13 +302,19 @@ func (n *DNode) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	if !n.dirty {
 		return nil
 	}
+	now := time.Now()
+	n.attr.Atime = now
+	n.attr.Mtime = now
 	n.dirty = false
+
 	//TODO: change modified time
 	return nil
 }
 
 func (n *DNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	p_printf("Remove, {%s}", n)
+
+	n.attr.Atime = time.Now()
 
 	var c *DNode
 	var ok bool
@@ -295,7 +326,11 @@ func (n *DNode) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 		return errors.New("can not remove an non-empty directory")
 	}
 
+	c.attr.Nlink -= 1
+
 	delete(n.child, req.Name)
+
+	n.attr.Mtime = time.Now()
 
 	p_println("Remove successful")
 	return nil
@@ -308,27 +343,63 @@ func (n *DNode) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.N
 	var ok bool
 	var node, dest *DNode
 
+	n.attr.Atime = time.Now()
 	//TODO use assert when converting
 	if dest, ok = newDir.(*DNode); !ok {
-		return errors.New("can not covert fs.Node to DNode")
+		p_printf("can not convert fs.Node to DNode")
+		return errors.New("can not convert fs.Node to DNode")
 	}
 
+	dest.attr.Atime = time.Now()
+
 	if node, ok = n.child[req.OldName]; !ok {
+		p_printf("file or dir does not exist")
 		return errors.New("file or dir does not exist")
 	}
 
-	if _, ok := dest.child[req.NewName]; ok {
-		return errors.New("file already exists at destination")
-	}
+	/*
+		//WOW: didn't know you should overwrite with rename :))
+		if _, ok := dest.child[req.NewName]; ok {
+			p_printf("file already exists at destination")
+			return errors.New("file already exists at destination")
+		}
+	*/
 
 	node.name = req.NewName
+	node.attr.Mtime = time.Now()
+
 	dest.child[node.name] = node
+	dest.attr.Mtime = time.Now()
 
 	delete(n.child, req.OldName)
+	n.attr.Mtime = time.Now()
 
 	p_printf("Rename successful")
 
 	return nil
+}
+
+func (n *DNode) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
+	p_printf("Link, {%s},", n)
+
+	var ok bool
+	var node *DNode
+
+	if node, ok = old.(*DNode); !ok {
+		p_printf("can not convert fs.Node to DNode")
+		return nil, errors.New("can not convert fs.Node to DNode")
+	}
+	p_printf("newName:%s, oldNode:{%s}", req.NewName, node)
+
+	if _, ok := n.child[req.NewName]; ok {
+		p_printf("file already exists at destination")
+		return nil, errors.New("file already exists at destination")
+	}
+
+	n.child[req.NewName] = node
+	node.attr.Nlink += 1
+
+	return node, nil
 }
 
 //=============================================================================
@@ -382,7 +453,7 @@ func main() {
 	// root must be defined before here
 	p_println("Creating root")
 	root := createDir(1, "", os.ModeDir|0777)
-	dfs := Dfs{root: root}
+	dfs = Dfs{root: root}
 	dfs.nodeMap = make(map[uint64]*DNode)
 	dfs.nodeMap[uint64(root.Inode())] = root
 	p_println("root inode ", root.Inode())
